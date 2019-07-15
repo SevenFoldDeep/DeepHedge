@@ -10,6 +10,7 @@ from rasterio.windows import Window
 import os
 
 def mask_split(file, outpath):
+    """Test change."""
     c_off = -97
     for j in range(35):
         c_off+=237
@@ -54,24 +55,6 @@ def bands_split(file, outpath):
                     dest.write(w)
             r_off+=249
             print('Processing %s' % a)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 if __name__ == '__main__':
