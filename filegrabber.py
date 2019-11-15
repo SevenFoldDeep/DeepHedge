@@ -6,6 +6,7 @@ Created on Wed Jun 26 10:34:17 2019
 """
 import os
 import re
+import shutil
 
 
 def getFiles(dirName, pattern=None, ending = '.tif'):
@@ -40,3 +41,39 @@ def getFiles(dirName, pattern=None, ending = '.tif'):
     else:
         rgb = [img for img in tifs if re.search(pattern, img)]
         return rgb
+    
+def annotate(files, file_path):
+    '''Used for Deeplab to create the text index files
+    
+    Parameters
+    ----------
+    files: list
+        List containing full file path strings to be annotated.
+    file_path: str
+        Outpath for the .txt file
+    
+    '''
+    
+    files = sorted(files)
+    temp = open(file_path, 'w')
+    for file in files:
+        try: 
+            i = file.rsplit('/', 1)[1]
+        except IndexError:
+            i = file.rsplit('\\', 1)[1]
+        i = os.path.splitext(i)[0]
+        temp.write(str(i) + '\n')
+    temp.close()
+    
+def file_matcher(text_file, in_path, out_path):
+    text = open(text_file)
+    files = [f.strip('\n') for f in text]
+    imgs = getFiles(in_path, ending='.png')
+    
+    for i in imgs:
+        img_id = i.rsplit('\\', 1)[1]
+        img_id = os.path.splitext(img_id)[0]
+        if img_id in files:
+            print(os.path.join(out_path, i))
+            shutil.move(i, out_path)
+    

@@ -61,7 +61,10 @@ class HedgeConfig(Config):
     # GPU because the images are small. Batch size is 8 (GPUs * images/GPU).
     GPU_COUNT = 1
     IMAGES_PER_GPU = 1
-
+    
+    # Number  of input channels
+    IMAGE_CHANNEL_COUNT = 4
+    
     # Number of classes (including background)
     NUM_CLASSES = 1 + 1  # background + hedge
 
@@ -93,7 +96,7 @@ class HedgeConfig(Config):
     USE_MINI_MASK = False
     
     #mean pixel values for each band.
-    MEAN_PIXEL = np.array([0,0,0,0])
+    MEAN_PIXEL = np.array([241, 511, 477, 2565])
     
     #keep a positive:negative
     # ratio of 1:3. You can increase the number of proposals by adjusting
@@ -111,11 +114,14 @@ class HedgeConfig(Config):
     
     
 ############################################################
-#  Dataset
+#  Mask R-CNN
 ############################################################
 
+
 class HedgeMask(modellib.MaskRCNN):
+    '''Modified Mask R-CNN class from matterport to allow for 4 channel input.
     
+    '''
     def build(self, mode, config):
         """Build Mask R-CNN architecture.
             input_shape: The shape of the input image.
@@ -344,6 +350,110 @@ class HedgeMask(modellib.MaskRCNN):
         return model
 
 
+    def train(self, train_dataset, val_dataset, learning_rate, epochs, layers,
+              augmentation=None, custom_callbacks=None, no_augmentation_sources=None):
+        """Train the model.
+        train_dataset, val_dataset: Training and validation Dataset objects.
+        learning_rate: The learning rate to train with
+        epochs: Number of training epochs. Note that previous training epochs
+                are considered to be done alreay, so this actually determines
+                the epochs to train in total rather than in this particaular
+                call.
+        layers: Allows selecting wich layers to train. It can be:
+            - A regular expression to match layer names to train
+            - One of these predefined values:
+              heads: The RPN, classifier and mask heads of the network
+              all: All the layers
+              3+: Train Resnet stage 3 and up
+              4+: Train Resnet stage 4 and up
+              5+: Train Resnet stage 5 and up
+        augmentation: Optional. An imgaug (https://github.com/aleju/imgaug)
+            augmentation. For example, passing imgaug.augmenters.Fliplr(0.5)
+            flips images right/left 50% of the time. You can pass complex
+            augmentations as well. This augmentation applies 50% of the
+            time, and when it does it flips images right/left half the time
+            and adds a Gaussian blur with a random sigma in range 0 to 5.
+                augmentation = imgaug.augmenters.Sometimes(0.5, [
+                    imgaug.augmenters.Fliplr(0.5),
+                    imgaug.augmenters.GaussianBlur(sigma=(0.0, 5.0))
+                ])
+	    custom_callbacks: Optional. Add custom callbacks to be called
+	        with the keras fit_generator method. Must be list of type keras.callbacks.
+        no_augmentation_sources: Optional. List of sources to exclude for
+            augmentation. A source is string that identifies a dataset and is
+            defined in the Dataset class.
+        """
+        assert self.mode == "training", "Create model in training mode."
+
+        # Pre-defined layer regular expressions
+        layer_regex = {
+            # all layers but the backbone
+            "heads": r"(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
+            # From a specific Resnet stage and up
+            "3+": r"(res3.*)|(bn3.*)|(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
+            "4+": r"(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
+            "5+": r"(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
+            # All layers
+            "all": ".*",
+        }
+        if layers in layer_regex.keys():
+            layers = layer_regex[layers]
+
+        # Data generators
+        train_generator = data_generator(train_dataset, self.config, shuffle=True,
+                                         augmentation=augmentation,
+                                         batch_size=self.config.BATCH_SIZE,
+                                         no_augmentation_sources=no_augmentation_sources)
+        val_generator = data_generator(val_dataset, self.config, shuffle=True,
+                                       batch_size=self.config.BATCH_SIZE)
+
+        # Create log_dir if not exists
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+
+        # Callbacks
+        callbacks = [
+            keras.callbacks.TensorBoard(log_dir=self.log_dir,
+                                        histogram_freq=0, write_graph=True, write_images=False),
+            keras.callbacks.ModelCheckpoint(self.checkpoint_path,
+                                            verbose=0, save_weights_only=True),
+        ]
+
+        # Add custom callbacks to the list
+        if custom_callbacks:
+            callbacks += custom_callbacks
+
+        # Train
+        log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
+        log("Checkpoint Path: {}".format(self.checkpoint_path))
+        self.set_trainable(layers)
+        self.compile(learning_rate, self.config.LEARNING_MOMENTUM)
+
+        # Work-around for Windows: Keras fails on Windows when using
+        # multiprocessing workers. See discussion here:
+        # https://github.com/matterport/Mask_RCNN/issues/13#issuecomment-353124009
+        if os.name is 'nt':
+            workers = 0
+        else:
+            workers = multiprocessing.cpu_count()
+
+        self.keras_model.fit_generator(
+            train_generator,
+            initial_epoch=self.epoch,
+            epochs=epochs,
+            steps_per_epoch=self.config.STEPS_PER_EPOCH,
+            callbacks=callbacks,
+            validation_data=val_generator,
+            validation_steps=self.config.VALIDATION_STEPS,
+            max_queue_size=100,
+            workers=workers,
+            use_multiprocessing=True,
+        )
+        self.epoch = max(self.epoch, epochs)
+############################################################
+#  Dataset
+############################################################
+
 class HedgeDataset(utils.Dataset):
 
     def add_hedge(self, dataset_dir, subset):
@@ -555,7 +665,7 @@ if __name__ == '__main__':
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='Mask R-CNN for nuclei counting and segmentation')
+        description='Mask R-CNN for hedge detection and segmentation')
     parser.add_argument("command",
                         metavar="<command>",
                         help="'train' or 'detect'")
@@ -564,9 +674,9 @@ if __name__ == '__main__':
                         help='Root directory of the dataset')
     parser.add_argument('--weights', required=True,
                         metavar="/path/to/weights.h5",
-                        help="Path to weights .h5 file or 'coco'")
+                        help="Can be 'last', 'crowdai', or 'imagenet'")
     parser.add_argument('--logs', required=False,
-                        default=DEFAULT_LOGS_DIR,
+                        default='/logs/',
                         metavar="/path/to/logs/",
                         help='Logs and checkpoints directory (default=logs/)')
     parser.add_argument('--subset', required=False,
@@ -588,42 +698,42 @@ if __name__ == '__main__':
 
     # Configurations
     if args.command == "train":
-        config = NucleusConfig()
+        config = HedgeConfig()
     else:
-        config = NucleusInferenceConfig()
+        config = HedgeConfig()
     config.display()
 
     # Create model
     if args.command == "train":
-        model = modellib.MaskRCNN(mode="training", config=config,
+        model = modellib.HedgeMask(mode="training", config=config,
                                   model_dir=args.logs)
     else:
-        model = modellib.MaskRCNN(mode="inference", config=config,
+        model = modellib.HedgeMask(mode="inference", config=config,
                                   model_dir=args.logs)
 
     # Select weights file to load
-    if args.weights.lower() == "coco":
-        weights_path = COCO_WEIGHTS_PATH
+    if args.weights.lower() == "crowdai":
+        weights_path = r'\pretrained_weights.h5'
         # Download weights file
         if not os.path.exists(weights_path):
             utils.download_trained_weights(weights_path)
-    elif args.weights.lower() == "last":
+    if args.weights.lower() == "last":
         # Find last trained weights
         weights_path = model.find_last()
     elif args.weights.lower() == "imagenet":
         # Start from ImageNet trained weights
         weights_path = model.get_imagenet_weights()
-    else:
-        weights_path = args.weights
+   # else:
+       # weights_path = args.weights
 
     # Load weights
     print("Loading weights ", weights_path)
-    if args.weights.lower() == "coco":
+    if args.weights.lower() == "crowdai":
         # Exclude the last layers because they require a matching
         # number of classes
         model.load_weights(weights_path, by_name=True, exclude=[
             "mrcnn_class_logits", "mrcnn_bbox_fc",
-            "mrcnn_bbox", "mrcnn_mask"])
+            "mrcnn_bbox", "mrcnn_mask", 'conv1'])
     else:
         model.load_weights(weights_path, by_name=True)
 
