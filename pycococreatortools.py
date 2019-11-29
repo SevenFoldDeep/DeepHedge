@@ -7,11 +7,11 @@ import numpy as np
 from itertools import groupby
 from skimage import measure
 from PIL import Image
-from fileGrabber import getFiles
+from filegrabber import getFiles
 import rasterio
 import json
-
-import shutil
+import os
+from fileMover import annotate
 
 convert = lambda text: int(text) if text.isdigit() else text.lower()
 natrual_key = lambda key: [ convert(c) for c in re.split('([0-9]+)', key) ]
@@ -131,16 +131,53 @@ def create_annotation_info(annotation_mask, image_id, segmentation_id, filename,
     return annotation_info#, seg_n, id#, image_info
 
 
-            
+def check_hedge_sizes(mask_folder, img_folder):
+    
+    mask_files = getFiles(mask_folder, ending='.png')
+    
+    for i, file in enumerate(mask_files):
+        img_id = file.rsplit('\\', 1)[1]
+        i_id = str(re.findall(r'\d+', img_id)).strip('[]').replace("'", "").replace(",","").replace(" ", "_")
+        with rasterio.open(file) as src:
+            w = src.read(1)
 
+        if np.max(w)!=1:
+            print('no hedge')
+            print('DELETING', file)
+            os.remove(file)
+            file2 = os.path.join(img_folder, img_id)
+            print('DELETING', file2)
+            
+            os.remove(file2)
+            continue
+            
+        m_info = create_annotation_info(w, i_id, i, file, (320, 320))
+
+        areas=[]
+        for entry in m_info:
+            areas.append(entry['area'])
+        if all(area < 20 for area in areas):
+            print('Hedges too small')
+            print('DELETING', file)
+            os.remove(file)
+            file2 = os.path.join(img_folder, img_id)
+            print('DELETING', file2)
+            os.remove(file2)
 
 
 
 if __name__ == '__main__':
 
-    #Get mask images
-    in_fold = r'C:\Users\ahls_st\Documents\MasterThesis\ShapeFile_StudyArea\Hedges_Mask_Splits'
-    files = getFiles(in_fold)
+    #Get hedge mask images
+    train = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Masks\train' #change
+    aug = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Augs\mask\Scale' #change
+    val = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Masks\val' #change
+    
+    files = getFiles(train, ending='.png') #change **** ONLY IF files are not in png format
+    files2=getFiles(val, ending='.png') #change **** ONLY IF files are not in png format
+    files3=getFiles(aug, ending='.png') #change **** ONLY IF files are not in png format
+    files = sorted(files+files2+files3)
+    len(files)
     
     #Get mask annotations info
     mask_anno = []
@@ -149,29 +186,39 @@ if __name__ == '__main__':
         i_id = str(re.findall(r'\d+', img_id)).strip('[]').replace("'", "").replace(",","").replace(" ", "_")
         with rasterio.open(file) as src:
             w = src.read(1)
-        #check if the image contains the object class, if so then should return a 1 and make the statement true.
-        if np.unique(w)[1:]:
-            m_info = create_annotation_info(w, i_id, i, file, (320, 320))
-            mask_anno.append(m_info)
-    del mask_anno[0]#dirty fix to a problem where the first element is an empty array which screws up the rest of the code
+        #if images with hedges havent been seperated yet then uncomment the following line and tab the other two over
+        #if np.max(w)==1:
+        m_info = create_annotation_info(w, i_id, i, file, (320, 320))
+        mask_anno.append(m_info)
+    
     
     
     #Get satellite images from folder 
-    in_fold = r'C:\Users\ahls_st\Documents\MasterThesis\PlanetData\Split_Data'
-    files = getFiles(in_fold)
+    in_fold = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Images\train' #change
+    in_fold2 = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Images\val' #change
+    aug = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Augs\img\Rot45' #change
+    files = getFiles(in_fold, ending='.png') #change **** ONLY IF files are not in png format
+    files2=getFiles(in_fold2, ending='.png') #change **** ONLY IF files are not in png format
+    files3=getFiles(aug, ending='.png') #change **** ONLY IF files are not in png format
+    files = sorted(files+files2+files3)
+    len(files)
     
     #Get images annotation info
     image_infos = []
-    j = 0
     for file in files:
-        file_check = file.rsplit('\\', 1)[1]
-        if j == len(mask_anno):
-            break
-        elif file_check == mask_anno[j][0]['filename']:
-            i_info = create_image_info(file, (320,320))
-            image_infos.append(i_info)
-            j += 1
-        
+        i_info = create_image_info(file, (320,320))
+        image_infos.append(i_info)
+
+    # ensure the indexes are matching properly
+    len(mask_anno)
+    len(image_infos)
+    if len(mask_anno) != len(image_infos):
+        raise ValueError('Mask and image annotations are not properly matched')
+    
+    print(mask_anno[15])
+    print(image_infos[15])
+    if mask_anno[15] != image_infos[15]:
+        raise ValueError('Mask and image annotations are not properly matched')
     
     #Create the rest of the json sections
     categories = [{'supercategory': 'Vegetation',
@@ -198,33 +245,11 @@ if __name__ == '__main__':
             'licenses': licenses
             }
 
-    #create the json file
-    with open('Planet_Training.json', 'w') as json_file:  
+    #create the json file for Mask R-CNN
+    with open('IKONOS_3Band_Aug_Rot45.json', 'w') as json_file:  #change
         json.dump(COCO, json_file)
     
-    
-    #Extract only the files that contained the object and put them in a seperate folder somewhere
-    dest = r"C:\Users\ahls_st\Documents\MasterThesis\PlanetData\Training_Images"
-    k=0
-    for file in files:
-        if k == len(image_infos):
-            break
-        name = file.rsplit('\\', 1)[1]
-        if name == image_infos[k]['file_name']:
-            shutil.copy(file, dest)
-            k+=1
-        
-    in_fold = r'C:\Users\ahls_st\Documents\MasterThesis\ShapeFile_StudyArea\Hedges_Mask_Splits'
-    files = getFiles(in_fold)
-    
-    dest = r"C:\Users\ahls_st\Documents\MasterThesis\ShapeFile_StudyArea\Hedges_for_train"
-    k=0
-    for file in files:
-        if k == len(image_infos):
-            break
-        name = file.rsplit('\\', 1)[1]
-        if name == image_infos[k]['file_name']:
-            shutil.copy(file, dest)
-            k+=1
-        
-        
+    #Creates annotation files for Deeplab
+    files_anno=sorted(files+files3)
+    annotate(files_anno, 'train_4band_geo_aug.txt') #change
+    annotate(files2, 'val_4band_geo_aug.txt') #change

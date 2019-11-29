@@ -142,15 +142,14 @@ def anisodiff(img,niter=1,kappa=50,gamma=0.1,step=(1.,1.),option=1,ploton=False)
 
 
 def normalize(array):
-    """Normalizes numpy arrays into scale 0.0 - 1.0 """
+    """Normalizes numpy arrays into scale 0.0 - 1.0
+    """
     array_min, array_max = array.min(), array.max()
     return ((array - array_min)/(array_max - array_min))
 
 def invert(array):
+    '''Inverts the values of an array based on their data type'''
     return np.iinfo(array.dtype).max - array
-
-def invert_half(array):
-    return (np.iinfo(array.dtype).max/2) - array
 
 class Augmenter():
     '''Augments data within a specified image and mask directory.
@@ -162,9 +161,14 @@ class Augmenter():
     mask_dir: str
         Path to input directory containing image mask files
     img_format: str
-        String stating the file extention of the target images.
-    augmentations: list of augmenters
-        Total list of augmentations that can be applied to the image and mask.
+        String stating the file extention of the target images. Ex. '.png'
+    augment_geometric: list
+        List containing only the geometric augmentations.
+    augment_spectral: list
+        List containing only spectral augmentations
+    augmentations: list
+        Total list of augmentations from the imgaug package that can be applied
+        to the image and mask.
     
     '''
     def __init__(self, img_dir, mask_dir, img_format):
@@ -180,9 +184,7 @@ class Augmenter():
                                   iaa.OneOf([iaa.Affine(rotate=280)]),
                                   iaa.OneOf([iaa.Affine(rotate=320)]),
                                   iaa.OneOf([iaa.Affine(scale={"x": (0.8), "y": (0.8)})]),
-                                  iaa.OneOf([iaa.Affine(scale={"x": (0.7), "y": (0.7)})]),
                                   iaa.OneOf([iaa.Affine(scale={"x": (1.2), "y": (1.2)})]),   #10
-                                  iaa.OneOf([iaa.Affine(scale={"x": (1.3), "y": (1.3)})]),
                                   iaa.OneOf([iaa.Flipud(1)]),
                                   iaa.OneOf([iaa.Fliplr(1)])]     #13
         
@@ -212,13 +214,13 @@ class Augmenter():
                             iaa.OneOf([iaa.AddElementwise((-60, -10))]),#12
                             iaa.OneOf([iaa.AddElementwise((10, 60))]), 
                             iaa.OneOf([iaa.GaussianBlur(sigma=(0.75))]),
-                            iaa.OneOf([iaa.GaussianBlur(sigma=(1.00))]),
+                            iaa.OneOf([iaa.GaussianBlur(sigma=(1.50))]),
                             iaa.OneOf([iaa.LogContrast(gain=(0.6, 1.4))]),
                             iaa.OneOf([iaa.LogContrast(gain=(0.6, 1.4), per_channel=True)]),
-                            iaa.OneOf([iaa.Add((-60, -40)), iaa.Add((40, 80))]),
+                            iaa.OneOf([iaa.Add((-60, -40))]),
                             iaa.OneOf([iaa.Add((40, 80))]),
-                            iaa.OneOf([iaa.Add((-40, 0), per_channel=True)]),
-                            iaa.OneOf([iaa.Add((0, 40), per_channel=True)])     #20
+                            iaa.OneOf([iaa.Add((-40, 0), per_channel=True)]), #20
+                            iaa.OneOf([iaa.Add((0, 40), per_channel=True)])     #21
                               ]
     
     def getFiles(self, dirName, pattern=None, ending = '.tif'):
@@ -229,10 +231,14 @@ class Augmenter():
         
         Parameters
         ----------
-        pattern: string
+        dirName: str
+            Full path for the directory containing the target files
+        pattern: str
             A string determining a sequence of letters which can be used to identify
             the desired image files. Useful if a folder contains multiple .tif files
-            and only one is desired.
+            and only one set is desired.
+        ending: str
+            String giving the file extension of the target files.
         """
         
         # create a list of file and sub directories 
@@ -257,7 +263,21 @@ class Augmenter():
     
     
     def load_img_and_mask(self, img_path, mask_path=False, n_bands=3, shape=320, data_type=np.uint16):
-        '''Function used in augment() to load image and mask files. 
+        '''Function used in self.augment() to load image and mask files. 
+        
+        Parameters
+        ----------
+        img_path: str
+            Full path for the directory containing images to be loaded
+        mask_path: str (optional)
+            Full path for the directory containing images to be loaded. Only 
+            necessary when geometric augmentations are applied
+        n_bands: int
+            Number of bands in the images.
+        shape: int
+            Image dimensions. Assumed to be square (length = width)
+        data_type: np.datatype
+            Data type of the image files. Defaults to 16 bit.
         
         '''
         if mask_path:
@@ -267,10 +287,10 @@ class Augmenter():
             if n_bands == 4:
                 with rasterio.open(img_path) as src:
                      '''need to read it in this way, otherwise the output that cv2 writes has the bands in the wrong order, don't ask me why'''
-                     img[:,:,0] = src.read(4)
-                     img[:,:,1] = src.read(3)
-                     img[:,:,2] = src.read(2)
-                     img[:,:,3] = src.read(1)
+                     img[:,:,3] = src.read(4)
+                     img[:,:,2] = src.read(3)
+                     img[:,:,1] = src.read(2)
+                     img[:,:,0] = src.read(1)
             if n_bands == 3:
                 with rasterio.open(img_path) as src:
                      '''need to read it in this way, otherwise the output that cv2 writes has the bands in the wrong order, don't ask me why'''
@@ -287,10 +307,10 @@ class Augmenter():
             if n_bands == 4:
                 with rasterio.open(img_path) as src:
                      '''need to read it in this way, otherwise the output that cv2 writes has the bands in the wrong order, don't ask me why'''
-                     img[:,:,0] = src.read(4)
-                     img[:,:,1] = src.read(3)
-                     img[:,:,2] = src.read(2)
-                     img[:,:,3] = src.read(1)
+                     img[:,:,3] = src.read(4)
+                     img[:,:,2] = src.read(3)
+                     img[:,:,1] = src.read(2)
+                     img[:,:,0] = src.read(1)
             if n_bands == 3:
                 with rasterio.open(img_path) as src:
                      '''need to read it in this way, otherwise the output that cv2 writes has the bands in the wrong order, don't ask me why'''
@@ -304,8 +324,8 @@ class Augmenter():
         
     def augmentation_picker(self, max_num_augs, category):
         '''
-        Randomly chooses the number of different augmentations and then randomly 
-        chooses which of the available augmentations to use.
+        Randomly chooses the number of different augmentations to apply to an
+        image and then randomly chooses from the available augmentations.
         '''
         if category == 'geo':
             augs = len(self.augment_geometric)
@@ -401,7 +421,8 @@ class Augmenter():
 
     def augment(self, outpath_img, outpath_mask, n_bands):
         '''Performs image and mask augmentations applying only a single 
-        augmentation to each image.
+        augmentation to each image. Each augmentation is applied exactly once
+        to each image.
         
         Parameters
         ----------
@@ -433,16 +454,18 @@ class Augmenter():
                 #apply all the different augmentations to the mask and image
                 for num, aug in enumerate(self.augmentations):
                     
-                    if num in range(12, 20): #add the index of any augmentations that will screw up the binary mask to this
+                    if num in range(12, 22): #add the index of any augmentations 
+                                             #that will screw up the binary mask to this
                         
-                        #only apply this to augmentations where values get changed b.c it will totally screw up the mask by
-                        #adding/minusing ect. values from the mask, but mask should stay as binary (0,1)
+                        #only apply this to augmentations where values get changed 
+                        #ex. adding/minusing values from the mask, but mask should stay binary (0,1)
                         
                         img_aug = aug(images=[_im])
                         
                         #create outpath names
                         out_img = os.path.join(outpath_img, 'A{}_{}'.format(num, img_id))
                         out_mask = os.path.join(outpath_mask, 'A{}_{}'.format(num, mask_id))
+                        
                         
                         #write files
                         cv2.imwrite(out_img, img_aug[0].astype(np.uint16))
@@ -459,12 +482,15 @@ class Augmenter():
                         
                         out_img = os.path.join(outpath_img, 'A{}_{}'.format(num, img_id))
                         out_mask = os.path.join(outpath_mask, 'A{}_{}'.format(num, mask_id))
-                       
+                        
+                        assert np.min(msk_aug[0]) == 0 and np.max(msk_aug[0]) == 1, 'Mask is not binary'
+                        
                         #write files
                         cv2.imwrite(out_img, img_aug[0].astype(np.uint16))
                         print('Image: {} written'.format(img_id))
                         cv2.imwrite(out_mask, msk_aug[0].astype(np.uint8))
                         print('Mask: {} written'.format(mask_id))
+            
             
     def aniso_aug(self, outpath_img):
         """Performs anisotropic diffusion on images as a type of augmentation"""
@@ -481,24 +507,38 @@ class Augmenter():
             cv2.imwrite(out_img, empty.astype(np.uint16))
             print('Image: {} written'.format(img_id))
             
+            
     def invert_aug(self, outpath_img):
+        """Inverts image pixel values based on their maximum value based on dtype"""
         img_paths = sorted(self.getFiles(self.img_dir, ending=self.img_type))
         for im in img_paths:
             img_id = im.rsplit('\\', 1)[1]
             _im = self.load_img_and_mask(im, None)
             img_aug_0 = invert(_im)
-            #img_aug_1 = invert_half(_im)
             out_img_0 = os.path.join(outpath_img, 'A0_{}'.format(img_id))
-            #out_img_1 = os.path.join(outpath_img, 'A1_{}'.format(img_id))
             cv2.imwrite(out_img_0, img_aug_0.astype(np.uint16))
-            #cv2.imwrite(out_img_1, img_aug_1.astype(np.uint16))
             print('Image: {} written'.format(img_id))
             
     def random_crop(self, outpath_img, outpath_mask, n_bands, num=1):
+        """Performs random cropping on both images and their masks so that masks 
+        still properly align with image afterwards
+        
+        Parameters
+        ----------
+        outpath_img: str
+            The folder where cropped images should be saved to.
+        outpath_mask: str
+            The folder where cropped masks should be saved to.
+        n_bands: int
+            Number of bands in the images.
+        num: int
+            Determines the number of times a random crop should be chosen and
+            applied to an image and mask pair
+        """
         img_paths = sorted(self.getFiles(self.img_dir, ending=self.img_type))
         mask_paths = sorted(self.getFiles(self.mask_dir, ending=self.img_type))
         
-        #start looping through each file and performing augmentations on each
+        #start looping through each file and performing crops on each
         for im, msk in zip(img_paths, mask_paths):
             
             for i in range(num):

@@ -5,11 +5,6 @@ Created on Mon Jul 22 14:37:48 2019
 @author: ahls_st
 """
 
-# Randomly samples files from one folder and gets the masks to match.
-# Only run ONCE per set of images, since a second call will get a new sample, 
-# and you will need to move all files back to the original folder and start
-# again.
-
 import os
 import numpy as np
 import shutil
@@ -42,8 +37,19 @@ def match_files(dir_to_match_with, dir_to_move_from, dir_to_move_to, copy=False)
     '''Moves (or copies) only files which have the same name as those in another 
     folder. Useful when one has a folder of mask files which have been split into
     training and validation sets, and one wishes to then move the same image
-    files so that both mask and images folders have the same matching files
+    files so that both mask and images folders have the same matching files.
+    
+    Parameters
+    ----------
+    dir_to_match_with: str
+        Path of the directory containing the list of file names you wish to
+        also have in a seperate directory
 
+    dir_to_move_from: str 
+        Path of the directory containing the files you wish to extract.
+        
+    dir_to_move_to: str
+        Path of the directory where files should be moved into.
     '''
     
     files_match = os.listdir(dir_to_match_with)
@@ -61,7 +67,9 @@ def match_files(dir_to_match_with, dir_to_move_from, dir_to_move_to, copy=False)
 class TrainValSplit():
     """
     Splits a set of images into training and validation, then moves the files
-    into new train and val folders.
+    into new train and val folders. Has one process for Mask R-CNN and one for
+    DeepLabv3+ as both have different data format requirements.
+    
     """
     
     def __init__(self, 

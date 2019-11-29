@@ -6,7 +6,6 @@ Created on Wed Jun 26 10:34:17 2019
 """
 import os
 import re
-import shutil
 
 
 def getFiles(dirName, pattern=None, ending = '.tif'):
@@ -17,10 +16,14 @@ def getFiles(dirName, pattern=None, ending = '.tif'):
     
     Parameters
     ----------
+    dirName: str
+        Path of the folder where the target files are located.
     pattern: string
         A string determining a sequence of letters which can be used to identify
         the desired image files. Useful if a folder contains multiple .tif files
         and only one is desired.
+    ending: str
+        String giving the file extension of the desired files.
     """
     # create a list of file and sub directories 
     # names in the given directory 
@@ -32,7 +35,7 @@ def getFiles(dirName, pattern=None, ending = '.tif'):
         fullPath = os.path.join(dirName, entry)
         # If entry is a directory then get the list of files in this directory 
         if os.path.isdir(fullPath):
-            allFiles = allFiles + getFiles(fullPath)
+            allFiles = allFiles + getFiles(fullPath, ending = ending, pattern = pattern)
         else:
             allFiles.append(fullPath)
     tifs=[file for file in allFiles if file.endswith(ending)]
@@ -41,39 +44,3 @@ def getFiles(dirName, pattern=None, ending = '.tif'):
     else:
         rgb = [img for img in tifs if re.search(pattern, img)]
         return rgb
-    
-def annotate(files, file_path):
-    '''Used for Deeplab to create the text index files
-    
-    Parameters
-    ----------
-    files: list
-        List containing full file path strings to be annotated.
-    file_path: str
-        Outpath for the .txt file
-    
-    '''
-    
-    files = sorted(files)
-    temp = open(file_path, 'w')
-    for file in files:
-        try: 
-            i = file.rsplit('/', 1)[1]
-        except IndexError:
-            i = file.rsplit('\\', 1)[1]
-        i = os.path.splitext(i)[0]
-        temp.write(str(i) + '\n')
-    temp.close()
-    
-def file_matcher(text_file, in_path, out_path):
-    text = open(text_file)
-    files = [f.strip('\n') for f in text]
-    imgs = getFiles(in_path, ending='.png')
-    
-    for i in imgs:
-        img_id = i.rsplit('\\', 1)[1]
-        img_id = os.path.splitext(img_id)[0]
-        if img_id in files:
-            print(os.path.join(out_path, i))
-            shutil.move(i, out_path)
-    

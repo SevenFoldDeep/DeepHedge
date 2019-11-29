@@ -19,7 +19,9 @@ from fileMover import match_files
 
 def getFactor(image, ind=0):
     '''
-    Function to help set up sliding windows.
+    Function to help set up sliding windows to create smaller image tiles from
+    large satellite images. Allows for a certain amount of overlap between 
+    neighbouring images as this is standard practice in the literature.
     
     Parameters
     ----------
@@ -55,11 +57,14 @@ def getFactor(image, ind=0):
         print('number of cols: ', col)
     
     def allfactors(n):
+        '''Gets all factors of the number of rows or columns of the image'''
         return set(
             factor for i in range(1, int(n**0.5) + 1) if n % i == 0
             for factor in (i, n//i)
         )
     
+    #function used to check if the amount of image overlap is within desired 
+    #range
     def factchecker(nums):
         for x in nums:
             if x>225 and x<280:
@@ -99,6 +104,7 @@ class ImageTilerPlanet():
     Note
     ----
     Does not work with small images where only a few windows fit into the image
+    
     TODO: make the iteration depend on a while statement. Get the total number 
     of columns or rows from the function above. Then use this to keep track of 
     how much space is left that the window can slide by minusing the offset value
@@ -170,7 +176,7 @@ class ImageTilerPlanet():
                 print('Processing tile number {}'.format(a))
 
     def bands_split(self, height=320, width=320):
-        '''Splits a multi-band input image. c_off and r_off represent the 
+        '''Splits a multi-band input image. 
         
         Parameters
         ----------
@@ -213,6 +219,8 @@ class ImageTilerPlanet():
 class ImageTilerIKONOS():
     '''Take a georeferenced image and splits it into overlapping window tiles,
     retaining their original geolocations.
+    Different from the PlanetTiler in that the naming convention for the outfile
+    (Planet doesn't use a tile ID while IKONOS splitting does in my case).
     
     Parameters
     ----------
@@ -348,9 +356,9 @@ def erase(mask, min_pixels):
     # Let us now remove all the regions which are too small.
     refined_mask = mask.copy()
     minimum_cc_sum = min_pixels
-    for labe in range(num_labels):
-        if np.sum(refined_mask[labelled_mask == labe+1]) < minimum_cc_sum:
-            refined_mask[labelled_mask == labe+1] = 0
+    for lab in range(num_labels):
+        if np.sum(refined_mask[labelled_mask == lab+1]) < minimum_cc_sum:
+            refined_mask[labelled_mask == lab+1] = 0
     return refined_mask
             
 def find_hedges(in_path, outpath, move=None, erase_thres=200):
@@ -366,10 +374,10 @@ def find_hedges(in_path, outpath, move=None, erase_thres=200):
         Path where masks containing hedges should be moved to.
     move: str (optional)
         String giving the folder path of where to move masks without hedges.
-        If not given then the masks without hedges will simply be deleted. 
-        More cautious approach is to first move the masks and inspect that
+        If left as none then masks without hedges will simply be deleted. 
+        When first testing different erase thresholds this is not recommended.
+        More CAUTIOUS approach is to first move the masks and inspect that
         only unwanted masks have been moved, and then deleting them manually.
-        When first testing different erase thresholds this is recommended.
     
     """
     #get all mask image tiles
@@ -395,24 +403,24 @@ def find_hedges(in_path, outpath, move=None, erase_thres=200):
 
 if __name__ == '__main__':
     # Window the mask images.
-    out_sh = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\masks'
-    in_sh = r'D:\Steve\IKONOS\302_Images\Clipped_mask_freyung\Mask_302_2.tif'
-    ImageTilerIKONOS(in_sh, out_sh).mask_split(tile_id='302_2')
+    out_sh = r'D:\Steve\val_imgs_coords\all_masks'
+    in_sh = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\po_2643534_0000000\PanSharp\Mask_Images\2_Mask_534.png'
+    ImageTilerIKONOS(in_sh, out_sh).mask_split(tile_id='534_1')
     
     # Window the raster images.
-    out_r = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\imgs'
-    in_r = r'D:\Steve\IKONOS\302_Images\Clipped_to_Freyung\Clipped_302_2.tif'
-    ImageTilerIKONOS(in_r, out_r).bands_split(tile_id='302_2')
+    #out_r = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\imgs'
+    #in_r = r'D:\Steve\IKONOS\302_Images\Clipped_to_Freyung\Clipped_302_2.tif'
+    #ImageTilerIKONOS(in_r, out_r).bands_split(tile_id='302_2')
     
     # Find windows that contain hedges.
-    out = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\masks\Cleaned'
+    #out = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\masks\Cleaned'
     #in_ = r'C:\Users\ahls_st\Documents\MasterThesis\IKONOS\With_Hedges\ThreeBands\Splits\BGR\Augs\mask\full'
-    mv = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\masks\Removed'
-    find_hedges(out_sh, out, mv)
+    #mv = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\masks\Removed'
+    #find_hedges(out_sh, out, mv)
     
     # Moves the images which match to the mask files
-    mv2 = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\imgs\Cleaned'
-    match_files(out, out_r, mv2)
+    #mv2 = r'D:\Steve\IKONOS\302_Images\Processed_with_Windows\imgs\Cleaned'
+    #match_files(out, out_r, mv2)
     
     #ImageTilerPlanet(in_r, out_r).bands_split()
     #ImageTilerPlanet(in_sh, out_sh).mask_split()

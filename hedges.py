@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 """
+Created on Mon Jul 22 12:17:47 2019
+
+@author: ahls_st
+"""
+
+# -*- coding: utf-8 -*-
+"""
 Created on Sat Jul 13 14:38:47 2019
 
 @author: LENOVO
@@ -14,6 +21,8 @@ Copyright (c) 2017 Matterport, Inc.
 Licensed under the MIT License (see LICENSE for details)
 Written by Waleed Abdulla
 """
+
+
 import keras.layers as KL
 import keras.backend as K
 import tensorflow as tf
@@ -28,13 +37,24 @@ from mrcnn.config import Config
 from mrcnn import utils
 from mrcnn import model as modellib
 import skimage
-import fileGrabber
+import json
+import re
+import scipy.ndimage
+from keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard, ReduceLROnPlateau, LearningRateScheduler
+from mrcnn.model import data_generator, log
+import multiprocessing
+import matplotlib.pyplot as plt
+import rasterio
+from skimage.draw import polygon
+import cv2
+import math
+import scipy.ndimage
 from mrcnn.model import (resnet_graph, build_rpn_model, norm_boxes_graph, ProposalLayer,parse_image_meta_graph, DetectionTargetLayer,
                          fpn_classifier_graph, build_fpn_mask_graph, rpn_class_loss_graph, rpn_bbox_loss_graph, mrcnn_class_loss_graph,
                          mrcnn_bbox_loss_graph, mrcnn_mask_loss_graph, DetectionLayer)
 
 
-# Root directory of the project
+# Root directory of the project (goes back a maximum of two folder directories from where this file is located)
 ROOT_DIR = os.path.abspath("../../")
 
 # Import Mask RCNN
@@ -47,81 +67,197 @@ if __name__ == '__main__':
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-
-
-class HedgeConfig(Config):
-    """Configuration for training on the hedges dataset.
-    Derives from the base Config class and overrides values specific
-    to the hedges dataset.
+##############################
+# Some Functions
+##############################
+    
+def GetFiles(dirName, pattern=None, ending = '.png'):
     """
-    # Give the configuration a recognizable name
-    NAME = "hedges"
-
-    # Train on 1 GPU and 8 images per GPU. We can put multiple images on each
-    # GPU because the images are small. Batch size is 8 (GPUs * images/GPU).
-    GPU_COUNT = 1
-    IMAGES_PER_GPU = 1
+    Gets all files within a directory tree which end with the given file ending
+    and optionally which have a certain string pattern. Good for getting all 
+    files stored across different sub-folders.
     
-    # Number  of input channels
-    IMAGE_CHANNEL_COUNT = 4
-    
-    # Number of classes (including background)
-    NUM_CLASSES = 1 + 1  # background + hedge
-
-    # Use small images for faster training. Set the limits of the small side
-    # the large side, and that determines the image shape.
-    IMAGE_MIN_DIM = 320
-    IMAGE_MAX_DIM = 320
-
-    # Use smaller anchors because our image and objects are small
-    RPN_ANCHOR_SCALES = (8, 16, 32, 64, 128)  # anchor side in pixels
-
-    # Reduce training ROIs per image because the images are small and have
-    # few objects. Aim to allow ROI sampling to pick 33% positive ROIs.
-    TRAIN_ROIS_PER_IMAGE = 32
-
-    # Use a small epoch since the data is simple
-    STEPS_PER_EPOCH = 500
-
-    # use small validation steps since the epoch is small
-    VALIDATION_STEPS = 35
-    
-    #can play with this to see what gives best accuracy
-    DETECTION_MIN_CONFIDENCE = 0.7
-    
-    #todo
-    RPN_ANCHOR_RATIOS = [0.33, 1, 33]
-
-    #True is good when using high resolution images. Planet isnt that high?
-    USE_MINI_MASK = False
-    
-    #mean pixel values for each band.
-    MEAN_PIXEL = np.array([241, 511, 477, 2565])
-    
-    #keep a positive:negative
-    # ratio of 1:3. You can increase the number of proposals by adjusting
-    # the RPN NMS threshold.
-    TRAIN_ROIS_PER_IMAGE = 200
-    
-    LEARNING_RATE = 0.001
-    LEARNING_MOMENTUM = 0.9
-
-    # Weight decay regularization
-    WEIGHT_DECAY = 0.0001
-    
-    #maybe set to true since the batches might be large enough with DLR GPUs
-    TRAIN_BN = False  # Defaulting to False since batch size is often small
-    
-    
-############################################################
-#  Mask R-CNN
-############################################################
+    Parameters
+    ----------
+    pattern: string
+        A string determining a sequence of letters which can be used to identify
+        the desired image files. Useful if a folder contains multiple .tif files
+        and only one is desired.
+    """
+    # create a list of file and sub directories 
+    # names in the given directory 
+    listOfFile = os.listdir(dirName)
+    allFiles = []
+    # Iterate over all the entries
+    for entry in listOfFile:
+        # Create full path
+        fullPath = os.path.join(dirName, entry)
+        # If entry is a directory then get the list of files in this directory 
+        if os.path.isdir(fullPath):
+            allFiles = allFiles + GetFiles(fullPath)
+        else:
+            allFiles.append(fullPath)
+    tifs=[file for file in allFiles if file.endswith(ending)]
+    if pattern is None:
+        return tifs
+    else:
+        rgb = [img for img in tifs if re.search(pattern, img)]
+        return rgb
 
 
-class HedgeMask(modellib.MaskRCNN):
-    '''Modified Mask R-CNN class from matterport to allow for 4 channel input.
-    
+##########################################
+# Mask RCNN Patch (Fixes an error due to version incompatibility)
+##########################################
+
+class HedgeCNN(modellib.MaskRCNN):
+    '''Patched the training to remove the built in callbacks to avoid conflict 
+    with my custom callbacks. Also patches an error due to Keras version 
+    incompatibility
     '''
+    def train(self, train_dataset, val_dataset, learning_rate, epochs, layers,
+              augmentation=None, custom_callbacks=None, no_augmentation_sources=None):
+        """Train the model.
+        train_dataset, val_dataset: Training and validation Dataset objects.
+        learning_rate: The learning rate to train with
+        epochs: Number of training epochs. Note that previous training epochs
+                are considered to be done alreay, so this actually determines
+                the epochs to train in total rather than in this particaular
+                call.
+        layers: Allows selecting wich layers to train. It can be:
+            - A regular expression to match layer names to train
+            - One of these predefined values:
+              heads: The RPN, classifier and mask heads of the network
+              all: All the layers
+              3+: Train Resnet stage 3 and up
+              4+: Train Resnet stage 4 and up
+              5+: Train Resnet stage 5 and up
+        augmentation: Optional. An imgaug (https://github.com/aleju/imgaug)
+            augmentation. For example, passing imgaug.augmenters.Fliplr(0.5)
+            flips images right/left 50% of the time. You can pass complex
+            augmentations as well. This augmentation applies 50% of the
+            time, and when it does it flips images right/left half the time
+            and adds a Gaussian blur with a random sigma in range 0 to 5.
+                augmentation = imgaug.augmenters.Sometimes(0.5, [
+                    imgaug.augmenters.Fliplr(0.5),
+                    imgaug.augmenters.GaussianBlur(sigma=(0.0, 5.0))
+                ])
+	    custom_callbacks: Optional. Add custom callbacks to be called
+	        with the keras fit_generator method. Must be list of type keras.callbacks.
+        no_augmentation_sources: Optional. List of sources to exclude for
+            augmentation. A source is string that identifies a dataset and is
+            defined in the Dataset class.
+        """
+        assert self.mode == "training", "Create model in training mode."
+
+        # Pre-defined layer regular expressions
+        layer_regex = {
+            # all layers but the backbone
+            "heads": r"(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)",
+            # From a specific Resnet stage and up
+            "3+": r"(res3.*)|(bn3.*)|(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)",
+            "4+": r"(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)",
+            "5+": r"(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)",
+            # All layers
+            "all": ".*",
+        }
+        if layers in layer_regex.keys():
+            layers = layer_regex[layers]
+
+        # Data generators
+        train_generator = data_generator(train_dataset, self.config, shuffle=True,
+                                         augmentation=augmentation,
+                                         batch_size=self.config.BATCH_SIZE,
+                                         no_augmentation_sources=no_augmentation_sources)
+        val_generator = data_generator(val_dataset, self.config, shuffle=True,
+                                       batch_size=self.config.BATCH_SIZE)
+
+        # Create log_dir if it does not exist
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+
+        # Callbacks
+        callbacks = []
+
+        # Add custom callbacks to the list
+        if custom_callbacks:
+            callbacks += custom_callbacks
+
+        # Train
+        log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
+        log("Checkpoint Path: {}".format(self.checkpoint_path))
+        self.set_trainable(layers)
+        self.compile(learning_rate, self.config.LEARNING_MOMENTUM)
+
+        # Work-around for Windows: Keras fails on Windows when using
+        # multiprocessing workers. See discussion here:
+        # https://github.com/matterport/Mask_RCNN/issues/13#issuecomment-353124009
+        if os.name == 'nt':
+            workers = 0
+        else:
+            workers = multiprocessing.cpu_count()
+            
+        self.keras_model.fit_generator(
+            train_generator,
+            initial_epoch=self.epoch,
+            epochs=epochs,
+            steps_per_epoch=self.config.STEPS_PER_EPOCH,
+            callbacks=callbacks,
+            validation_data=val_generator,
+            validation_steps=self.config.VALIDATION_STEPS,
+            max_queue_size=100,
+            workers=workers,
+            use_multiprocessing=True,
+        )
+        self.epoch = max(self.epoch, epochs)
+        
+    def load_weights(self, filepath, by_name=False, exclude=None):
+        """Modified version of the corresponding Keras function with
+        the addition of multi-GPU support and the ability to exclude
+        some layers from loading.
+        exclude: list of layer names to exclude
+        """
+        import h5py
+        # Conditional import to support versions of Keras before 2.2
+        # TODO: remove in about 6 months (end of 2018)
+        
+        from keras.engine import saving
+        
+
+        if exclude:
+            by_name = True
+
+        if h5py is None:
+            raise ImportError('`load_weights` requires h5py.')
+        f = h5py.File(filepath, mode='r')
+        if 'layer_names' not in f.attrs and 'model_weights' in f:
+            f = f['model_weights']
+
+        # In multi-GPU training, we wrap the model. Get layers
+        # of the inner model because they have the weights.
+        keras_model = self.keras_model
+        layers = keras_model.inner_model.layers if hasattr(keras_model, "inner_model")\
+            else keras_model.layers
+
+        # Exclude some layers
+        if exclude:
+            layers = filter(lambda l: l.name not in exclude, layers)
+
+        if by_name:
+            saving.load_weights_from_hdf5_group_by_name(f, layers)
+        else:
+            saving.load_weights_from_hdf5_group(f, layers)
+        if hasattr(f, 'close'):
+            f.close()
+
+        # Update the log directory
+        self.set_log_dir(filepath)
+
+
+        
+class HedgeFourCNN(HedgeCNN):
+    '''Patch of the MaskRCNN model to allow for four band inputs'''
+        
+
     def build(self, mode, config):
         """Build Mask R-CNN architecture.
             input_shape: The shape of the input image.
@@ -344,152 +480,308 @@ class HedgeMask(modellib.MaskRCNN):
 
         # Add multi-GPU support.
         if config.GPU_COUNT > 1:
-            from mrcnn.parallel_model import ParallelModel
-            model = ParallelModel(model, config.GPU_COUNT)
-
+            #from mrcnn.parallel_model import ParallelModel
+            #from parallel import ParallelModel
+            #from keras.utils import multi_gpu_model
+            from parallel import multi_gpu_model
+            #model = ParallelModel(model, config.GPU_COUNT)
+            model = multi_gpu_model(model, gpus=2)
+            
+            
         return model
+#########################################
+# Configuration settings for training and inference modes
+#########################################
 
+class HedgeConfig(Config):
+    """Configuration for training on the hedges dataset.
+    Derives from the base Config class and overrides values specific
+    to the hedges dataset.
+    """
+    # Give the configuration a recognizable name
+    NAME = "hedges"
+    
+    GPU_COUNT = 1
+    
+    #Can train on more images per batch when we only unfreeze the network heads, otherwise we need to train on less per GPU (below)
+    IMAGES_PER_GPU = 6
+#    # Num of training images / batch size (I add a few more steps because data augmentation creates a few more images?)
+    STEPS_PER_EPOCH = 1916
+#    # Num of valid. images / batch size
+    VALIDATION_STEPS = 28
+    
+ #   IMAGES_PER_GPU = 3
+    # Num of training images / batch size (I add a few more steps because data augmentation creates a few more images?)
+    #STEPS_PER_EPOCH = 85
+    # Num of valid. images / batch size
+    #VALIDATION_STEPS = 28
+    
+    
+    
+    # Number of classes (including background)
+    NUM_CLASSES = 1 + 1  # background + hedge
 
-    def train(self, train_dataset, val_dataset, learning_rate, epochs, layers,
-              augmentation=None, custom_callbacks=None, no_augmentation_sources=None):
-        """Train the model.
-        train_dataset, val_dataset: Training and validation Dataset objects.
-        learning_rate: The learning rate to train with
-        epochs: Number of training epochs. Note that previous training epochs
-                are considered to be done alreay, so this actually determines
-                the epochs to train in total rather than in this particaular
-                call.
-        layers: Allows selecting wich layers to train. It can be:
-            - A regular expression to match layer names to train
-            - One of these predefined values:
-              heads: The RPN, classifier and mask heads of the network
-              all: All the layers
-              3+: Train Resnet stage 3 and up
-              4+: Train Resnet stage 4 and up
-              5+: Train Resnet stage 5 and up
-        augmentation: Optional. An imgaug (https://github.com/aleju/imgaug)
-            augmentation. For example, passing imgaug.augmenters.Fliplr(0.5)
-            flips images right/left 50% of the time. You can pass complex
-            augmentations as well. This augmentation applies 50% of the
-            time, and when it does it flips images right/left half the time
-            and adds a Gaussian blur with a random sigma in range 0 to 5.
-                augmentation = imgaug.augmenters.Sometimes(0.5, [
-                    imgaug.augmenters.Fliplr(0.5),
-                    imgaug.augmenters.GaussianBlur(sigma=(0.0, 5.0))
-                ])
-	    custom_callbacks: Optional. Add custom callbacks to be called
-	        with the keras fit_generator method. Must be list of type keras.callbacks.
-        no_augmentation_sources: Optional. List of sources to exclude for
-            augmentation. A source is string that identifies a dataset and is
-            defined in the Dataset class.
-        """
-        assert self.mode == "training", "Create model in training mode."
+    # Use small images for faster training by allowing more images per batch. Set the limits of the small side
+    # the large side, and that determines the image shape.
+    IMAGE_MIN_DIM = 320
+    IMAGE_MAX_DIM = 320
+    
+    #If 'adam' then uses adam optimizer, 'SGD' is other option
+    OPTIMIZER = 'SGD'
 
-        # Pre-defined layer regular expressions
-        layer_regex = {
-            # all layers but the backbone
-            "heads": r"(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
-            # From a specific Resnet stage and up
-            "3+": r"(res3.*)|(bn3.*)|(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
-            "4+": r"(res4.*)|(bn4.*)|(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
-            "5+": r"(res5.*)|(bn5.*)|(mrcnn\_.*)|(rpn\_.*)|(fpn\_.*)|(conv1\_.*)",
-            # All layers
-            "all": ".*",
-        }
-        if layers in layer_regex.keys():
-            layers = layer_regex[layers]
+    #size of anchors for the object region proposals
+    RPN_ANCHOR_SCALES = (30, 60, 100, 150, 200)  # anchor side in pixels
 
-        # Data generators
-        train_generator = data_generator(train_dataset, self.config, shuffle=True,
-                                         augmentation=augmentation,
-                                         batch_size=self.config.BATCH_SIZE,
-                                         no_augmentation_sources=no_augmentation_sources)
-        val_generator = data_generator(val_dataset, self.config, shuffle=True,
-                                       batch_size=self.config.BATCH_SIZE)
+    #the minimum confidence required for a region proposal to be kept as a positive detection
+    DETECTION_MIN_CONFIDENCE = 0.7
+    #amount of overlap two detected bounding boxes need to have before one of them gets supressed.
+    DETECTION_NMS_THRESHOLD = 0.2
+    
+    #Want to have long and narrow anchors, and one square shaped.
+    RPN_ANCHOR_RATIOS = [0.2, 1.2, 5]
+    
+    #Values from the Mask R-CNN paper
+    RPN_BBOX_STD_DEV = np.array([0.1, 0.1, 0.2, 0.2])
+    
+    #amount of overlap that two bounding box proposals need to have for one of them to be supressed. So if its low then we get less BB.
+    RPN_NMS_THRESHOLD = 0.9
+    
+    #True is good when using high resolution images. Planet isnt that high?
+    USE_MINI_MASK = False
+    
+    #mean pixel values for each band.
+    #MEAN_PIXEL = np.array([338, 390, 809])
+    MEAN_PIXEL = np.array([0, 0, 0])
+    
+    MAX_GT_INSTANCES = 10
 
-        # Create log_dir if not exists
-        if not os.path.exists(self.log_dir):
-            os.makedirs(self.log_dir)
+    DETECTION_MAX_INSTANCES = 50
 
-        # Callbacks
-        callbacks = [
-            keras.callbacks.TensorBoard(log_dir=self.log_dir,
-                                        histogram_freq=0, write_graph=True, write_images=False),
-            keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-                                            verbose=0, save_weights_only=True),
-        ]
+    #keep a positive:negative
+    # ratio of 1:3. You can increase the number of proposals by adjusting
+    # the RPN NMS threshold.
+    TRAIN_ROIS_PER_IMAGE = 200
+    
+    LEARNING_RATE = 0.01
+    LEARNING_MOMENTUM = 0.93
+    #LEARNING_MOMENTUM = 0.90
+    
+    # Weight decay regularization
+    WEIGHT_DECAY = 0.0001
+    
+    #only train if batch size is large
+    TRAIN_BN = False  
+    
+    #loss weights. 
+    #Giving more importance to the accurate classification of region proposals as well as masking. Bounding box accuracy is less important 
+    LOSS_WEIGHTS = {
+        "rpn_class_loss": 25.,
+        "rpn_bbox_loss": 0.6,
+        "mrcnn_class_loss": 6.,
+        "mrcnn_bbox_loss": 1.,
+        "mrcnn_mask_loss": 2.0
+    }
+    
+class InfHedgeConfig(Config):
+    """Configuration for training on the hedges dataset.
+    Derives from the base Config class and overrides values specific
+    to the hedges dataset.
+    """
+    # Give the configuration a recognizable name
+    NAME = "hedges"
 
-        # Add custom callbacks to the list
-        if custom_callbacks:
-            callbacks += custom_callbacks
+    # Train on 1 GPU and 8 images per GPU. We can put multiple images on each
+    # GPU because the images are small. Batch size is 8 (GPUs * images/GPU).
+    GPU_COUNT = 1
+    IMAGES_PER_GPU = 1
+    
+    # Number of classes (including background)
+    NUM_CLASSES = 1 + 1  # background + hedge
 
-        # Train
-        log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
-        log("Checkpoint Path: {}".format(self.checkpoint_path))
-        self.set_trainable(layers)
-        self.compile(learning_rate, self.config.LEARNING_MOMENTUM)
+    # Use small images for faster training. Set the limits of the small side
+    # the large side, and that determines the image shape.
+    IMAGE_MIN_DIM = 320
+    IMAGE_MAX_DIM = 320
 
-        # Work-around for Windows: Keras fails on Windows when using
-        # multiprocessing workers. See discussion here:
-        # https://github.com/matterport/Mask_RCNN/issues/13#issuecomment-353124009
-        if os.name is 'nt':
-            workers = 0
-        else:
-            workers = multiprocessing.cpu_count()
+    # Use smaller anchors because our image and objects are small
+    RPN_ANCHOR_SCALES = (30, 60, 100, 150, 200)   # anchor side in pixels
+    
+    RPN_NMS_THRESHOLD = 0.9
+    
+    #Use for mAP
+    DETECTION_MIN_CONFIDENCE = 0.80
+    DETECTION_NMS_THRESHOLD = 0.95
+    
+    #Use for creating the mask maps
+    #can play with this to see what gives best accuracy
+    #DETECTION_MIN_CONFIDENCE = 0.60
+    #DETECTION_NMS_THRESHOLD = 0.95
+    
+    #todo
+    RPN_ANCHOR_RATIOS = [0.2, 1.2, 5]
 
-        self.keras_model.fit_generator(
-            train_generator,
-            initial_epoch=self.epoch,
-            epochs=epochs,
-            steps_per_epoch=self.config.STEPS_PER_EPOCH,
-            callbacks=callbacks,
-            validation_data=val_generator,
-            validation_steps=self.config.VALIDATION_STEPS,
-            max_queue_size=100,
-            workers=workers,
-            use_multiprocessing=True,
-        )
-        self.epoch = max(self.epoch, epochs)
+    #True is good when using high resolution images. Planet isnt that high?
+    USE_MINI_MASK = False
+    
+    #mean pixel values for each band.
+    #MEAN_PIXEL = np.array([338, 390, 809])
+    MEAN_PIXEL = np.array([0, 0, 0])
+    
+    MAX_GT_INSTANCES = 10
+
+    DETECTION_MAX_INSTANCES = 50
+
+    #keep a positive:negative
+    # ratio of 1:3. You can increase the number of proposals by adjusting
+    # the RPN NMS threshold.
+    TRAIN_ROIS_PER_IMAGE = 200
+   
+
+    # Weight decay regularization
+    WEIGHT_DECAY = 0.0001
+    
+    #maybe set to true since the batches might be large enough with DLR GPUs
+    TRAIN_BN = False  # Defaulting to False since batch size is often small
+    
+    
+    
+    
+class HedgeConfigFour(Config):
+    """Configuration for training on the hedges dataset.
+    Derives from the base Config class and overrides values specific
+    to the hedges dataset.
+    """
+    # Give the configuration a recognizable name
+    NAME = "hedges"
+    
+    
+    # Number  of input channels
+    IMAGE_CHANNEL_COUNT = 4
+    
+    
+    GPU_COUNT = 2
+    
+    #Can train on more images per batch when we only unfreeze the network heads, otherwise we need to train on less per GPU (below)
+    IMAGES_PER_GPU = 1
+#    # Num of training images / batch size (I add a few more steps because data augmentation creates a few more images?)
+    STEPS_PER_EPOCH = 64
+#    # Num of valid. images / batch size
+    VALIDATION_STEPS = 20
+    
+ #   IMAGES_PER_GPU = 3
+    # Num of training images / batch size (I add a few more steps because data augmentation creates a few more images?)
+  #  STEPS_PER_EPOCH = 171
+    # Num of valid. images / batch size
+   # VALIDATION_STEPS = 57
+    
+    
+    
+    # Number of classes (including background)
+    NUM_CLASSES = 1 + 1  # background + hedge
+    
+    # Use small images for faster training by allowing more images per batch. Set the limits of the small side
+    # the large side, and that determines the image shape.
+    IMAGE_MIN_DIM = 320
+    IMAGE_MAX_DIM = 320
+    
+    #If 'adam' then uses adam optimizer, 'SGD' is other option
+    OPTIMIZER = 'SGD'
+
+    #size of anchors for the object region proposals
+    RPN_ANCHOR_SCALES = (30, 60, 100, 150, 200)  # anchor side in pixels
+
+    #the minimum confidence required for a region proposal to be kept as a positive detection
+    DETECTION_MIN_CONFIDENCE = 0.7
+    #amount of overlap two detected bounding boxes need to have before one of them gets supressed.
+    DETECTION_NMS_THRESHOLD = 0.2
+    
+    #Want to have long and narrow anchors, and one square shaped.
+    RPN_ANCHOR_RATIOS = [0.2, 0.4, 1.2, 2.5, 5]
+    
+    #Values from the Mask R-CNN paper
+    RPN_BBOX_STD_DEV = np.array([0.1, 0.1, 0.2, 0.2])
+    
+    #amount of overlap that two bounding box proposals need to have for one of them to be supressed. So if its low then we get less BB.
+    RPN_NMS_THRESHOLD = 0.9
+    
+    #True is good when using high resolution images. Planet isnt that high?
+    USE_MINI_MASK = False
+    
+    #mean pixel values for each band.
+    #MEAN_PIXEL = np.array([338, 390, 809])
+    MEAN_PIXEL = np.array([0, 0, 0])
+    
+    MAX_GT_INSTANCES = 10
+
+    DETECTION_MAX_INSTANCES = 50
+
+    #keep a positive:negative
+    # ratio of 1:3. You can increase the number of proposals by adjusting
+    # the RPN NMS threshold.
+    TRAIN_ROIS_PER_IMAGE = 200
+    
+    LEARNING_RATE = 0.01
+    #LEARNING_MOMENTUM = 0.93
+    LEARNING_MOMENTUM = 0.90
+    
+    # Weight decay regularization
+    WEIGHT_DECAY = 0.0001
+    
+    #only train if batch size is large
+    TRAIN_BN = True
+    
+    #loss weights. 
+    #Giving more importance to the accurate classification of region proposals as well as masking. Bounding box accuracy is less important 
+    LOSS_WEIGHTS = {
+        "rpn_class_loss": 25.,
+        "rpn_bbox_loss": 0.6,
+        "mrcnn_class_loss": 6.,
+        "mrcnn_bbox_loss": 1.,
+        "mrcnn_mask_loss": 2.0
+    }
 ############################################################
 #  Dataset
 ############################################################
 
 class HedgeDataset(utils.Dataset):
-
+        
+    def mask_anno(self, dataset_dir, json_path):
+        with open(os.path.join(dataset_dir, json_path), "r") as read_file:
+            data = json.load(read_file) 
+        self.mask_a = data['annotations']
+        
     def add_hedge(self, dataset_dir, subset):
         """Load a subset of the hedge dataset.
         dataset_dir: Root directory of the dataset
         subset: string giving the name of the folder where the data we want
             to load is located
-           
         """
         # Add classes. We have one class.
-        # Naming the dataset hedge, and the class hedge
+        # Naming the dataset hedge2019dataset, and the class hedge
         self.add_class("Hedges2019Dataset", 1, "hedge")
-
-        # Which subset?
-        # "val": use hard-coded list above
-        # "train": use data from stage1_train minus the hard-coded list above
-        # else: use the data from the specified sub-directory
-        assert subset in ["train", "val", "test"]
+        
         subset_dir = subset
         dataset_dir = os.path.join(dataset_dir, subset_dir)
         
         # Get image ids from directory names
-        image_ids = next(os.walk(dataset_dir))[2]
+        image_ids = GetFiles(dataset_dir, ending='.png')
 
         # Add images
         for image_id in image_ids:
-            #i_id = str(re.findall(r'\d+', image_id)).strip('[]').replace("'", "").replace(",","").replace(" ", "_")
-            pathh = os.path.join(dataset_dir, image_id)
-            image_inf = {'id': image_id,#i_id
-                          'path': pathh,
+            try: 
+                i = image_id.rsplit('/', 1)[1]
+            except IndexError:
+                i = image_id.rsplit('\\', 1)[1]
+            
+           
+            image_inf = {'id': i,
+                          'path': image_id,
                           'source': 'Hedges2019Dataset'
                     }
             self.image_info.append(image_inf)
             
     def load_image(self, image_id):
-        """Load the specified image and return a [H,W,4] Numpy array. Uses the 
+        """Load the specified image and return a [H,W,3] Numpy array. Uses the 
         self.image_info['path'] dictionary value to load the image so make sure 
         that the full path to each image is set by the add_hedge function first
         
@@ -500,35 +792,50 @@ class HedgeDataset(utils.Dataset):
         
         """
         # Load image
-        image = skimage.io.imread(self.image_info[image_id]['path'])
-        # If grayscale. Convert to RGB for consistency.
-        #if image.ndim != 3:
-            #image = skimage.color.gray2rgb(image)
-        # If has an alpha channel, remove it for consistency
+        image = np.zeros(shape=(320, 320, 3)).astype(np.uint16)
+        with rasterio.open(self.image_info[image_id]['path']) as src:
+            image[:,:,0] = src.read(1)
+            image[:,:,1] = src.read(2)
+            image[:,:,2] = src.read(3)
+        #im_mean = np.mean(image)
+        #im_std = np.std(image)
+        
+        #image = (image-im_mean)/im_std
         return image
 
+   
+    
+    
     def load_mask(self, image_id):
-        """Generate instance masks for an image.
+        """Generate instance masks for a single image.
        Returns:
         masks: A bool array of shape [height, width, instance count] with
             one mask per instance.
         class_ids: a 1D array of class IDs of the instance masks.
         """
+        instance_masks = []
+        check = self.image_info[image_id]['id']
+        #for entry in self.image_info:
+        #    if entry['index_ordered'] == image_id:
+         #       check = entry['id']
+        for img in self.mask_a:
+            for seg in img:
+                if seg['filename'] == check:
+                    y = np.squeeze(seg['segmentation'])[::2]
+                    x = np.squeeze(seg['segmentation'])[1::2]
+                    imge = np.zeros((320, 320), np.uint8)
+                    xx, yy = polygon(x, y)
+                    imge[xx, yy] = 1
+                    #imge = scipy.ndimage.morphology.binary_dilation(imge)
+                    instance_masks.append(imge)
+        masks = np.zeros((320,320,len(instance_masks)))
         
-        info = self.image_info[image_id]
-        # Get mask directory from image path
-        mask_dir = os.path.join(os.path.dirname(info['path']), "masks")
-
-        # Read mask files from .png image
-        mask = []
-        for f in fileGrabber(mask_dir):
-            m = skimage.io.imread(os.path.join(mask_dir, f)).astype(np.bool)
-            mask.append(m)
-        mask = np.stack(mask, axis=-1)
-        # Return mask, and array of class IDs of each instance. Since we have
-        # one class ID, we return an array of ones
-        return mask, np.ones([mask.shape[-1]], dtype=np.int32)
-
+        for n, i in enumerate(instance_masks):
+            masks[:,:,n] = i.astype(np.uint8)
+        class_id = np.ones(len(instance_masks), np.int32)
+        
+        return masks, class_id
+    
     def image_reference(self, image_id):
         """Return the path of the image."""
         info = self.image_info[image_id]
@@ -537,77 +844,76 @@ class HedgeDataset(utils.Dataset):
         else:
             super(self.__class__, self).image_reference(image_id)
 
+class HedgeDatasetFour(HedgeDataset):
+    def load_image(self, image_id):
+        """Load the specified image and return a [H,W,3] Numpy array. Uses the 
+        self.image_info['path'] dictionary value to load the image so make sure 
+        that the full path to each image is set by the add_hedge function first
+        
+        Parameters:
+            image_id: int
+                Should be an interative number which indexes individual image 
+                entries in the self.image_info list. 
+        
+        """
+        # Load image
+        image = np.zeros(shape=(320, 320, 4)).astype(np.uint16)
+        with rasterio.open(self.image_info[image_id]['path']) as src:
+            image[:,:,0] = src.read(1)
+            image[:,:,1] = src.read(2)
+            image[:,:,2] = src.read(3)
+            image[:,:,3] = src.read(4)
+
+        return image
 
 ############################################################
 #  Training
 ############################################################
 
-def train(model, dataset_dir, subset, callbacks):
+def train(model, dataset_dir, subset, json, weight_path, val_dir):
     """Train the model."""
     # Training dataset.
     dataset_train = HedgeDataset()
     dataset_train.add_hedge(dataset_dir, subset)
     dataset_train.add_class('Hedges2019Dataset', 1, 'Hedge')
     dataset_train.prepare()
+    dataset_train.mask_anno(dataset_dir, json)
 
     # Validation dataset
     dataset_val = HedgeDataset()
-    dataset_val.add_hedge(dataset_dir, 'val')
-    dataset_train.add_class('Hedges2019Dataset', 1, 'Hedge')
+    dataset_val.add_hedge(dataset_dir, val_dir)
+    dataset_val.add_class('Hedges2019Dataset', 1, 'Hedge')
     dataset_val.prepare()
+    dataset_val.mask_anno(dataset_dir, json)
 
-    # Image augmentation
-    # http://imgaug.readthedocs.io/en/latest/source/augmenters.html
-    augmentation = iaa.SomeOf((0, 2), [
-        iaa.Fliplr(0.5),#flips 50% of images along the horizontal axis
-        iaa.Flipud(0.5),#flips along the vertical axis
-        iaa.OneOf([iaa.Affine(rotate=90),
-                   iaa.Affine(rotate=45),
-                   iaa.Affine(rotate=200)]),
-        iaa.OneOf([iaa.Affine(scale=(0.5, 1.5)),
-                   iaa.Affine(translate_percent={"x": (-0.2, 0.2), "y": (-0.2, 0.2)}),
-                   iaa.Affine(shear=(-20,20)),
-                   iaa.Affine(translate_percent={"x": -0.20}, mode=iaa.ALL, cval=(0, 255))]),
-        iaa.PiecewiseAffine(scale=(0.01, 0.06)),
-        iaa.Multiply((0.9, 1.1)),
-        iaa.GaussianBlur(sigma=(0.0, 3.0)),
-        iaa.CropAndPad(percent=(-0.2, 0.2), pad_mode="edge"),
-        iaa.Resize((0.5, 1.0)),#resize the image between 50% and 100% of original size
-        iaa.Sharpen(alpha=(0.0, 0.2), lightness=1.0),
-        iaa.Superpixels(p_replace=0.5, n_segments=(75, 100))
-        #could use an add on a certain channel (DSM, NDVI, green or red?)
-        #the add can be positive or negative value
-    ])
-
-    # *** This training schedule is an example. Update to your needs ***
-
+    check = ModelCheckpoint(weight_path, monitor='val_loss', verbose=0, 
+                            save_best_only=False, save_weights_only=True, mode='min')
+    tensor = TensorBoard(log_dir='./logs/', histogram_freq=0, write_graph=True, write_images=True)
+ #   reduce = ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=10, mode='auto', min_delta=0.1, cooldown = 5, min_lr=10e-9)
+    
+    def step_decay(epoch, lr):
+        lrate = lr
+        if epoch % 40 == 0:
+            lrate = lr * 0.1
+        return lrate
+    
+   # def exp_decay(epoch, lr):
+    #    lrate = lr * np.exp(-0.1*epoch)
+     #   return lrate
+    
+    schedule = LearningRateScheduler(step_decay, verbose=1)
+    callbacks = [check, tensor, schedule]
     # If starting from imagenet, train heads only for a bit
     # since they have random weights
     print("Train network heads")
     model.train(dataset_train, dataset_val,
-                learning_rate=config.LEARNING_RATE,
-                epochs=160,
-                augmentation=augmentation, 
+                learning_rate=model.config.LEARNING_RATE,
+                epochs=100,
+                #augmentation=augmentation, 
                 custom_callbacks=callbacks,
                 layers='heads')
-
-    print("Train layers 4+")
-    model.train(dataset_train, dataset_val,
-                learning_rate=config.LEARNING_RATE,
-                epochs=50,
-                augmentation=augmentation,
-                custom_callbacks=callbacks,
-                layers='4+')
-
-    print("Train all layers")
-    model.train(dataset_train, dataset_val,
-                learning_rate=config.LEARNING_RATE,
-                epochs=20,
-                augmentation=augmentation,
-                custom_callbacks=callbacks,
-                layers='all')
-
-
+    
+    
 ############################################################
 #  Detection
 ############################################################
@@ -644,7 +950,7 @@ def detect(model, dataset_dir, subset, output_dir):
         visualize.display_instances(
             image, r['rois'], r['masks'], r['class_ids'],
             dataset.class_names, r['scores'],
-            show_bbox=False, show_mask=False,
+            show_bbox=True, show_mask=True,
             title="Predictions")
         plt.savefig("{}/{}.png".format(submit_dir, dataset.image_info[image_id]["id"]))
 
@@ -672,9 +978,9 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', required=False,
                         metavar="/path/to/dataset/",
                         help='Root directory of the dataset')
-    parser.add_argument('--weights', required=True,
-                        metavar="/path/to/weights.h5",
-                        help="Can be 'last', 'crowdai', or 'imagenet'")
+  #  parser.add_argument('--weights', required=True,
+   #                     metavar="/path/to/weights.h5",
+    #                    help="Can be 'last', 'crowdai', or 'imagenet'")
     parser.add_argument('--logs', required=False,
                         default='/logs/',
                         metavar="/path/to/logs/",
@@ -690,7 +996,7 @@ if __name__ == '__main__':
     elif args.command == "detect":
         assert args.subset, "Provide --subset to run prediction on"
 
-    print("Weights: ", args.weights)
+ #   print("Weights: ", args.weights)
     print("Dataset: ", args.dataset)
     if args.subset:
         print("Subset: ", args.subset)
@@ -698,53 +1004,21 @@ if __name__ == '__main__':
 
     # Configurations
     if args.command == "train":
-        config = HedgeConfig()
-    else:
-        config = HedgeConfig()
+        config = HedgeConfigFour()
+  #  else:
+   #     config = HedgeConfig()
     config.display()
 
     # Create model
     if args.command == "train":
-        model = modellib.HedgeMask(mode="training", config=config,
+        model = HedgeFourCNN(mode="training", config=config,
                                   model_dir=args.logs)
-    else:
-        model = modellib.HedgeMask(mode="inference", config=config,
-                                  model_dir=args.logs)
-
-    # Select weights file to load
-    if args.weights.lower() == "crowdai":
-        weights_path = r'\pretrained_weights.h5'
-        # Download weights file
-        if not os.path.exists(weights_path):
-            utils.download_trained_weights(weights_path)
-    if args.weights.lower() == "last":
-        # Find last trained weights
-        weights_path = model.find_last()
-    elif args.weights.lower() == "imagenet":
-        # Start from ImageNet trained weights
-        weights_path = model.get_imagenet_weights()
-   # else:
-       # weights_path = args.weights
-
-    # Load weights
-    print("Loading weights ", weights_path)
-    if args.weights.lower() == "crowdai":
-        # Exclude the last layers because they require a matching
-        # number of classes
-        model.load_weights(weights_path, by_name=True, exclude=[
-            "mrcnn_class_logits", "mrcnn_bbox_fc",
-            "mrcnn_bbox", "mrcnn_mask", 'conv1'])
-    else:
-        model.load_weights(weights_path, by_name=True)
 
     # Train or evaluate
     if args.command == "train":
-        train(model, args.dataset, args.subset)
+        trainfour(model, args.dataset, args.subset)
     elif args.command == "detect":
         detect(model, args.dataset, args.subset)
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'detect'".format(args.command))
-    
-    
-
